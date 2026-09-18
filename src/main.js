@@ -5,8 +5,8 @@
 // orchestration: scoring lives in evaluator.js, rendering in canvas.js, audio in
 // sound.js, content in data/.
 
-import { COMPONENTS, CATEGORIES, categoryColor, registerCustom, clearCustomTypes } from './data/components.js';
-import { PUZZLES, getPuzzle } from './data/puzzles.js';
+import { COMPONENTS, CATEGORIES, categoryColor, registerCustom, clearCustomTypes, getComponent } from './data/components.js';
+import { PUZZLES } from './data/puzzles.js';
 import { Board } from './canvas.js';
 import { evaluate, scoreTier, buildSolution } from './evaluator.js';
 import { SoundEngine } from './sound.js';
@@ -14,10 +14,10 @@ import { SoundEngine } from './sound.js';
 const $ = (sel) => document.querySelector(sel);
 const prefersReducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const STORE_KEY = 'patchboard:prefs';
+const PUZZLE_KEY = 'patchboard:puzzles';
+const CREATE_OPTION = '__create__';
 
 const sound = new SoundEngine();
-
-// ---- state -------------------------------------------------------------
 
 const state = {
   puzzle: null,
@@ -25,6 +25,8 @@ const state = {
   hintsShown: 0,
   customSeq: 0,
   solving: false,
+  customPuzzles: [], // user-authored puzzles, persisted in localStorage
+  labelConnId: null, // connection currently being labeled
 };
 
 // ---- board -------------------------------------------------------------
@@ -40,6 +42,7 @@ const board = new Board($('#canvas'), {
     refreshEmptyHint();
   },
   onDeleteConnection: () => sound.del(),
+  onEditLabel: (conn) => openLabelEditor(conn),
 });
 
 function refreshEmptyHint() {
@@ -59,8 +62,45 @@ function savePrefs(prefs) {
   try {
     localStorage.setItem(STORE_KEY, JSON.stringify(prefs));
   } catch (_) {
-    /* storage unavailable (private mode); preferences just won't persist */
+    /* storage unavailable; preferences just won't persist */
   }
+}
+function updatePref(key, value) {
+  const prefs = loadPrefs();
+  prefs[key] = value;
+  savePrefs(prefs);
+}
+
+function loadCustomPuzzles() {
+  try {
+    const arr = JSON.parse(localStorage.getItem(PUZZLE_KEY));
+    return Array.isArray(arr) ? arr : [];
+  } catch (_) {
+    return [];
+  }
+}
+function saveCustomPuzzles() {
+  try {
+    localStorage.setItem(PUZZLE_KEY, JSON.stringify(state.customPuzzles));
+  } catch (_) {
+    /* storage unavailable; custom puzzles won't persist */
+  }
+}
+
+function allPuzzles() {
+  return [...PUZZLES, ...state.customPuzzles];
+}
+function findPuzzle(id) {
+  return allPuzzles().find((p) => p.id === id);
+}
+
+// ---- theme -------------------------------------------------------------
+
+function applyTheme(theme) {
+  const light = theme === 'light';
+  document.documentElement.setAttribute('data-theme', light ? 'light' : 'dark');
+  $('#theme-label').textContent = light ? 'Light' : 'Dark';
+  $('#theme-toggle').title = light ? 'Switch to dark mode' : 'Switch to light mode';
 }
 
 // ---- palette -----------------------------------------------------------
@@ -69,7 +109,6 @@ function buildPalette() {
   const groups = $('#palette-groups');
   groups.innerHTML = '';
 
-  // One group per category, in category declaration order.
   for (const catId of Object.keys(CATEGORIES)) {
     const items = COMPONENTS.filter((c) => c.category === catId);
     if (!items.length) continue;
@@ -85,7 +124,6 @@ function buildPalette() {
     groups.appendChild(group);
   }
 
-  // Populate the custom-component category select.
   const catSel = $('#custom-category');
   catSel.innerHTML = '';
   for (const catId of Object.keys(CATEGORIES)) {
@@ -117,18 +155,23 @@ function makePaletteButton(def) {
 
 function buildProblemSelect() {
   const sel = $('#problem');
+  const current = state.puzzle ? state.puzzle.id : null;
   sel.innerHTML = '';
-  for (const p of PUZZLES) {
+  for (const p of allPuzzles()) {
     const opt = document.createElement('option');
     opt.value = p.id;
-    opt.textContent = p.title;
+    opt.textContent = p.custom ? `${p.title} ★` : p.title;
     sel.appendChild(opt);
   }
-  sel.addEventListener('change', () => loadPuzzle(sel.value));
+  const create = document.createElement('option');
+  create.value = CREATE_OPTION;
+  create.textContent = '➕ Create custom problem…';
+  sel.appendChild(create);
+  if (current) sel.value = current;
 }
 
 function loadPuzzle(id) {
-  const puzzle = getPuzzle(id);
+  const puzzle = findPuzzle(id);
   if (!puzzle) return;
   state.puzzle = puzzle;
   state.hintsUsed = 0;
@@ -139,10 +182,11 @@ function loadPuzzle(id) {
   syncConnectToggle();
   clearCustomTypes();
   state.customSeq = 0;
-  buildPalette(); // rebuild so removed custom types drop out of the palette
+  buildPalette();
 
   $('#problem-title').textContent = puzzle.title;
   $('#problem-desc').textContent = puzzle.desc;
+  $('#delete-problem-btn').hidden = !puzzle.custom;
 
   const reqList = $('#requirements-list');
   reqList.innerHTML = '';
@@ -152,16 +196,24 @@ function loadPuzzle(id) {
     reqList.appendChild(li);
   }
 
-  // Reset hints UI.
   $('#hints-list').innerHTML = '';
   $('#hints-panel').hidden = true;
   updateHintCount();
 
-  // Close any open panels.
   $('#solve-panel').hidden = true;
   $('#result-modal').hidden = true;
 
+  $('#problem').value = puzzle.id;
   refreshEmptyHint();
+}
+
+function deleteActiveProblem() {
+  const p = state.puzzle;
+  if (!p || !p.custom) return;
+  state.customPuzzles = state.customPuzzles.filter((x) => x.id !== p.id);
+  saveCustomPuzzles();
+  buildProblemSelect();
+  loadPuzzle(allPuzzles()[0].id);
 }
 
 // ---- hints -------------------------------------------------------------
@@ -178,8 +230,7 @@ function revealHint() {
   state.hintsUsed += 1;
   state.hintsShown += 1;
 
-  const panel = $('#hints-panel');
-  panel.hidden = false;
+  $('#hints-panel').hidden = false;
   const li = document.createElement('li');
   li.textContent = text;
   $('#hints-list').appendChild(li);
@@ -198,23 +249,32 @@ function syncConnectToggle() {
   $('#connect-banner').hidden = !on;
 }
 
+// ---- connection label editor ------------------------------------------
+
+function openLabelEditor(conn) {
+  state.labelConnId = conn.id;
+  $('#label-input').value = conn.label || '';
+  $('#label-modal').hidden = false;
+  $('#label-input').focus();
+}
+function closeLabelEditor() {
+  $('#label-modal').hidden = true;
+  state.labelConnId = null;
+}
+
 // ---- evaluation --------------------------------------------------------
 
 function runEvaluation() {
   if (!state.puzzle) return;
-  const result = evaluate(state.puzzle, board.snapshot(), state.hintsUsed);
-  showResult(result);
+  showResult(evaluate(state.puzzle, board.snapshot(), state.hintsUsed));
 }
 
 function showResult(result) {
   const modal = $('#result-modal');
   const ring = $('#score-ring');
   const valueEl = $('#score-value');
-  const tier = scoreTier(result.finalScore);
+  ring.dataset.tier = scoreTier(result.finalScore);
 
-  ring.dataset.tier = tier;
-
-  // Checklist.
   const list = $('#result-checklist');
   list.innerHTML = '';
   for (const r of result.results) {
@@ -233,14 +293,9 @@ function showResult(result) {
 
   modal.hidden = false;
 
-  // Count-up animation (respect reduced motion).
-  if (prefersReducedMotion()) {
-    valueEl.textContent = String(result.finalScore);
-  } else {
-    animateCount(valueEl, result.finalScore, 550);
-  }
+  if (prefersReducedMotion()) valueEl.textContent = String(result.finalScore);
+  else animateCount(valueEl, result.finalScore, 550);
 
-  // Distinct pass/fail resolution (60+ counts as passing).
   if (result.finalScore >= 60) sound.pass();
   else sound.fail();
 }
@@ -259,8 +314,6 @@ function animateCount(el, target, duration) {
 
 // ---- solve for me ------------------------------------------------------
 
-// Layout columns keyed by a coarse tier so the auto-built solution reads
-// left-to-right instead of piling up.
 const TIER = { entry: 0, edge: 1, compute: 2, cache: 3, storage: 3, messaging: 3 };
 
 async function solveForMe() {
@@ -269,7 +322,7 @@ async function solveForMe() {
   if (!ok) return;
 
   state.solving = true;
-  board.clear();
+  board.clear(); // also resets pan/zoom so the built layout is in view
   board.setConnectMode(false);
   syncConnectToggle();
   refreshEmptyHint();
@@ -278,7 +331,7 @@ async function solveForMe() {
   const rect = $('#canvas').getBoundingClientRect();
   const colWidth = Math.min(170, (rect.width - 60) / 4);
   const rowHeight = 92;
-  const tierRows = {}; // tier -> next row index
+  const tierRows = {};
 
   const delay = prefersReducedMotion() ? 0 : 200;
   const wait = (ms) => new Promise((res) => setTimeout(res, ms));
@@ -288,9 +341,7 @@ async function solveForMe() {
       const tier = TIER[categoryOf(step.type)] ?? 2;
       const row = tierRows[tier] || 0;
       tierRows[tier] = row + 1;
-      const x = 30 + tier * colWidth;
-      const y = 30 + row * rowHeight;
-      board.addBlock(step.type, x, y);
+      board.addBlock(step.type, 30 + tier * colWidth, 30 + row * rowHeight);
     } else if (step.kind === 'connect') {
       const a = board.findBlockByType(step.from);
       const b = board.findBlockByType(step.to);
@@ -305,25 +356,22 @@ async function solveForMe() {
 }
 
 function categoryOf(type) {
-  const defs = COMPONENTS.find((c) => c.type === type);
-  return defs ? defs.category : 'compute';
+  const def = getComponent(type) || COMPONENTS.find((c) => c.type === type);
+  return def ? def.category : 'compute';
 }
 
 function showSolveExplanation({ components, connections }) {
-  const compList = $('#solve-components');
-  const connList = $('#solve-connections');
-  compList.innerHTML = '';
-  connList.innerHTML = '';
-  for (const c of components) {
-    const li = document.createElement('li');
-    li.textContent = c;
-    compList.appendChild(li);
-  }
-  for (const c of connections) {
-    const li = document.createElement('li');
-    li.textContent = c;
-    connList.appendChild(li);
-  }
+  const fill = (sel, items) => {
+    const ul = $(sel);
+    ul.innerHTML = '';
+    for (const c of items) {
+      const li = document.createElement('li');
+      li.textContent = c;
+      ul.appendChild(li);
+    }
+  };
+  fill('#solve-components', components);
+  fill('#solve-connections', connections);
   $('#solve-panel').hidden = false;
 }
 
@@ -345,20 +393,147 @@ function resolveConfirm(value) {
   }
 }
 
-// ---- custom components -------------------------------------------------
+// ---- custom components (palette) --------------------------------------
 
 function addCustomComponent(label, category) {
   const clean = label.trim();
   if (!clean) return;
   const type = `custom:${++state.customSeq}`;
   const def = registerCustom(type, clean, category);
-  // Append a palette button to the matching category group (or a fallback).
   const groups = $('#palette-groups');
-  const groupTitles = [...groups.querySelectorAll('.palette-group')];
-  const targetGroup =
-    groupTitles.find((g) => g.querySelector('.palette-group-title').textContent.trim() === CATEGORIES[category].label) ||
-    groupTitles[groupTitles.length - 1];
-  targetGroup.querySelector('.palette-items').appendChild(makePaletteButton(def));
+  const groupList = [...groups.querySelectorAll('.palette-group')];
+  const target =
+    groupList.find((g) => g.querySelector('.palette-group-title').textContent.trim() === CATEGORIES[category].label) ||
+    groupList[groupList.length - 1];
+  target.querySelector('.palette-items').appendChild(makePaletteButton(def));
+}
+
+// ---- custom problem builder -------------------------------------------
+
+const TYPE_OPTIONS = COMPONENTS.map((c) => `<option value="${c.type}">${c.label}</option>`).join('');
+
+function componentReqRow() {
+  const row = document.createElement('div');
+  row.className = 'req-row';
+  row.innerHTML = `
+    <div class="req-field">
+      <span>Acceptable types (any one counts)</span>
+      <select multiple class="text-input req-select" data-role="ids">${TYPE_OPTIONS}</select>
+    </div>
+    <div class="req-field req-min-field">
+      <span>Min</span>
+      <input type="number" min="1" value="1" class="text-input req-min" data-role="min" />
+    </div>
+    <button type="button" class="req-remove" aria-label="Remove requirement">×</button>`;
+  row.querySelector('.req-remove').addEventListener('click', () => row.remove());
+  return row;
+}
+
+function connectionReqRow() {
+  const row = document.createElement('div');
+  row.className = 'req-row';
+  row.innerHTML = `
+    <div class="req-field">
+      <span>From (any one)</span>
+      <select multiple class="text-input req-select" data-role="from">${TYPE_OPTIONS}</select>
+    </div>
+    <div class="req-field">
+      <span>To (any one)</span>
+      <select multiple class="text-input req-select" data-role="to">${TYPE_OPTIONS}</select>
+    </div>
+    <button type="button" class="req-remove" aria-label="Remove requirement">×</button>`;
+  row.querySelector('.req-remove').addEventListener('click', () => row.remove());
+  return row;
+}
+
+function openBuilder() {
+  $('#builder-name').value = '';
+  $('#builder-desc').value = '';
+  $('#component-reqs').innerHTML = '';
+  $('#connection-reqs').innerHTML = '';
+  $('#component-reqs').appendChild(componentReqRow());
+  $('#connection-reqs').appendChild(connectionReqRow());
+  document.querySelectorAll('.hint-input').forEach((i) => (i.value = ''));
+  $('#builder-error').hidden = true;
+  $('#builder-modal').hidden = false;
+  $('#builder-name').focus();
+}
+
+function selectedValues(sel) {
+  return [...sel.selectedOptions].map((o) => o.value);
+}
+
+function componentLabel(type) {
+  const def = getComponent(type) || COMPONENTS.find((c) => c.type === type);
+  return def ? def.label : type;
+}
+
+function collectBuilder() {
+  const title = $('#builder-name').value.trim();
+  const desc = $('#builder-desc').value.trim() || 'A custom system-design problem.';
+
+  const requiredComponents = [];
+  for (const row of $('#component-reqs').querySelectorAll('.req-row')) {
+    const ids = selectedValues(row.querySelector('[data-role="ids"]'));
+    if (!ids.length) continue;
+    const min = Math.max(1, parseInt(row.querySelector('[data-role="min"]').value, 10) || 1);
+    const joined = ids.map(componentLabel).join(' or ');
+    const label = min > 1 ? `At least ${min} of: ${joined}` : `A ${joined}`;
+    requiredComponents.push({ ids, min, label });
+  }
+
+  const requiredConnections = [];
+  for (const row of $('#connection-reqs').querySelectorAll('.req-row')) {
+    const from = selectedValues(row.querySelector('[data-role="from"]'));
+    const to = selectedValues(row.querySelector('[data-role="to"]'));
+    if (!from.length || !to.length) continue;
+    const label = `Connect ${from.map(componentLabel).join(' or ')} to ${to.map(componentLabel).join(' or ')}`;
+    requiredConnections.push({ from, to, label });
+  }
+
+  const defaultHints = [
+    'Start from the entry point and trace the request path through the system.',
+    'Make sure every requirement has both its components and the connections that link them.',
+    'Stuck? Use "Solve for me" to see one valid reference solution.',
+  ];
+  const hints = [0, 1, 2].map((i) => {
+    const v = document.querySelector(`.hint-input[data-hint="${i}"]`).value.trim();
+    return v || defaultHints[i];
+  });
+
+  const requirements = [...requiredComponents.map((r) => r.label), ...requiredConnections.map((r) => r.label)];
+
+  return {
+    id: `custom:${Date.now()}`,
+    custom: true,
+    title,
+    desc,
+    requirements,
+    hints,
+    requiredComponents,
+    requiredConnections,
+  };
+}
+
+function submitBuilder(e) {
+  e.preventDefault();
+  const puzzle = collectBuilder();
+  const err = $('#builder-error');
+  if (!puzzle.title) {
+    err.textContent = 'Give the problem a title.';
+    err.hidden = false;
+    return;
+  }
+  if (!puzzle.requiredComponents.length) {
+    err.textContent = 'Add at least one component requirement with a type selected.';
+    err.hidden = false;
+    return;
+  }
+  state.customPuzzles.push(puzzle);
+  saveCustomPuzzles();
+  buildProblemSelect();
+  $('#builder-modal').hidden = true;
+  loadPuzzle(puzzle.id);
 }
 
 // ---- audio controls ----------------------------------------------------
@@ -370,7 +545,6 @@ function syncMuteButton() {
   $('#mute-label').textContent = sound.muted ? 'Muted' : 'Sound on';
   btn.title = sound.muted ? 'Sound off' : 'Sound on';
 }
-
 function syncAmbientButton() {
   const btn = $('#ambient-toggle');
   const on = sound.isDroneOn();
@@ -382,11 +556,19 @@ function syncAmbientButton() {
 // ---- wiring ------------------------------------------------------------
 
 function wireEvents() {
+  $('#problem').addEventListener('change', (e) => {
+    if (e.target.value === CREATE_OPTION) {
+      e.target.value = state.puzzle ? state.puzzle.id : allPuzzles()[0].id;
+      openBuilder();
+      return;
+    }
+    loadPuzzle(e.target.value);
+  });
+
   $('#connect-toggle').addEventListener('click', () => {
     board.setConnectMode(!board.connectMode);
     syncConnectToggle();
   });
-
   $('#hint-btn').addEventListener('click', revealHint);
   $('#evaluate-btn').addEventListener('click', runEvaluation);
   $('#solve-btn').addEventListener('click', solveForMe);
@@ -400,6 +582,16 @@ function wireEvents() {
     }
   });
 
+  $('#delete-problem-btn').addEventListener('click', async () => {
+    const ok = await showConfirm(`Delete "${state.puzzle.title}"? This custom problem will be removed permanently.`);
+    if (ok) deleteActiveProblem();
+  });
+
+  // Zoom / pan controls.
+  $('#zoom-in').addEventListener('click', () => board.zoomByCenter(1.2));
+  $('#zoom-out').addEventListener('click', () => board.zoomByCenter(1 / 1.2));
+  $('#zoom-reset').addEventListener('click', () => board.resetView());
+
   // Result modal.
   $('#result-close').addEventListener('click', () => ($('#result-modal').hidden = true));
   $('#result-dismiss').addEventListener('click', () => ($('#result-modal').hidden = true));
@@ -410,6 +602,17 @@ function wireEvents() {
   // Confirm modal.
   $('#confirm-ok').addEventListener('click', () => resolveConfirm(true));
   $('#confirm-cancel').addEventListener('click', () => resolveConfirm(false));
+
+  // Connection label editor.
+  $('#label-form').addEventListener('submit', (e) => {
+    e.preventDefault();
+    if (state.labelConnId) board.setConnectionLabel(state.labelConnId, $('#label-input').value);
+    closeLabelEditor();
+  });
+  $('#label-clear').addEventListener('click', () => {
+    if (state.labelConnId) board.setConnectionLabel(state.labelConnId, '');
+    closeLabelEditor();
+  });
 
   // Requirements collapse.
   $('#requirements-toggle').addEventListener('click', (e) => {
@@ -438,24 +641,38 @@ function wireEvents() {
     $('#custom-form').hidden = true;
   });
 
+  // Builder modal.
+  $('#add-component-req').addEventListener('click', () => $('#component-reqs').appendChild(componentReqRow()));
+  $('#add-connection-req').addEventListener('click', () => $('#connection-reqs').appendChild(connectionReqRow()));
+  $('#builder-form').addEventListener('submit', submitBuilder);
+  $('#builder-cancel').addEventListener('click', () => ($('#builder-modal').hidden = true));
+  $('#builder-close').addEventListener('click', () => ($('#builder-modal').hidden = true));
+
+  // Theme toggle.
+  $('#theme-toggle').addEventListener('click', () => {
+    const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    applyTheme(next);
+    updatePref('theme', next);
+  });
+
   // Audio.
   $('#mute-toggle').addEventListener('click', () => {
     sound.setMuted(!sound.muted);
     syncMuteButton();
-    const prefs = loadPrefs();
-    prefs.muted = sound.muted;
-    savePrefs(prefs);
+    updatePref('muted', sound.muted);
   });
   $('#ambient-toggle').addEventListener('click', () => {
     sound.toggleDrone();
     syncAmbientButton();
   });
 
-  // Close modals with Escape.
+  // Escape closes the topmost transient layer.
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
-    if (!$('#confirm-modal').hidden) resolveConfirm(false);
-    if (!$('#result-modal').hidden) $('#result-modal').hidden = true;
+    if (!$('#label-modal').hidden) return closeLabelEditor();
+    if (!$('#builder-modal').hidden) return ($('#builder-modal').hidden = true);
+    if (!$('#confirm-modal').hidden) return resolveConfirm(false);
+    if (!$('#result-modal').hidden) return ($('#result-modal').hidden = true);
     if (!$('#solve-panel').hidden) $('#solve-panel').hidden = true;
   });
 }
@@ -464,7 +681,9 @@ function wireEvents() {
 
 function init() {
   const prefs = loadPrefs();
+  applyTheme(prefs.theme === 'light' ? 'light' : 'dark');
   if (prefs.muted) sound.setMuted(true);
+  state.customPuzzles = loadCustomPuzzles();
 
   buildProblemSelect();
   buildPalette();
@@ -473,8 +692,7 @@ function init() {
   syncAmbientButton();
   syncConnectToggle();
 
-  loadPuzzle(PUZZLES[0].id);
-  $('#problem').value = PUZZLES[0].id;
+  loadPuzzle(allPuzzles()[0].id);
 }
 
 init();

@@ -65,6 +65,28 @@ Tiers: gold (85+), cyan (60–84), red (below 60). Out of scope by design: topol
 soundness beyond the checklist, capacity/cost, penalizing extra blocks, and
 partial credit within a single requirement.
 
+## Interaction
+
+- **Pan & zoom.** Drag empty canvas to pan; scroll to zoom (or use the +/−/reset
+  controls, bottom-right). Blocks and connections live in a transformed "world"
+  layer, so all pointer math accounts for the current zoom and pan.
+- **Connections select, they don't delete on click.** Click a line to select it;
+  a small toolbar appears at its midpoint with a delete (×) button and a label
+  (✎) button. Labels render along the line and are optional.
+- **Light / dark theme.** Toggle in the header (persisted). Dark is the blueprint
+  theme; light is a "whiteprint" drafting sheet. Both are driven entirely by CSS
+  custom-property tokens.
+
+## Custom problems
+
+The problem dropdown includes **"➕ Create custom problem…"**, which opens a
+builder: title, description, component requirements (each is a multi-select of
+acceptable types plus a minimum count), connection requirements (from-types →
+to-types), and optional hints. The result is a real, scorable puzzle — "Solve for
+me" works on it, and it's persisted in `localStorage` so it survives reloads.
+Custom problems are marked with a ★ in the dropdown and can be deleted from the
+problem header.
+
 ## Notes
 
 - **Custom components** (palette → "+ New component") place, drag, connect, and
