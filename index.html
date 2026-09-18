@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Patchboard — System Design Puzzles</title>
+    <meta
+      name="description"
+      content="Patchboard turns system design practice into an interactive puzzle: drag components onto a board, wire them together, and get checklist-based feedback."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="4" width="7" height="7" rx="1.5" /><rect x="14" y="13" width="7" height="7" rx="1.5" />
+            <path d="M10 7.5h2.5a1.5 1.5 0 0 1 1.5 1.5v4.5" /><circle cx="6.5" cy="16.5" r="2.5" />
+          </svg>
+        </span>
+        <span class="brand-name">Patchboard</span>
+      </div>
+
+      <div class="header-center">
+        <label class="sr-only" for="problem">Choose a problem</label>
+        <select id="problem" class="problem-select"></select>
+      </div>
+
+      <div class="header-controls">
+        <button id="ambient-toggle" class="icon-btn" type="button" aria-pressed="false" title="Ambient drone (off)">
+          <span class="icon-btn-dot" aria-hidden="true"></span>
+          <span class="icon-btn-label">Ambient</span>
+        </button>
+        <button id="mute-toggle" class="icon-btn" type="button" aria-pressed="false" title="Sound on">
+          <span class="mute-icon" aria-hidden="true"></span>
+          <span class="icon-btn-label" id="mute-label">Sound on</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="layout">
+      <!-- Palette ---------------------------------------------------------->
+      <aside class="palette" aria-label="Component palette">
+        <div class="palette-head">
+          <h2>Components</h2>
+          <button id="new-component-btn" class="ghost-btn" type="button">+ New component</button>
+        </div>
+
+        <form id="custom-form" class="custom-form" hidden>
+          <input
+            id="custom-label"
+            class="text-input"
+            type="text"
+            maxlength="24"
+            placeholder="Label (e.g. Rules Engine)"
+            autocomplete="off"
+          />
+          <label class="sr-only" for="custom-category">Category</label>
+          <select id="custom-category" class="text-input"></select>
+          <div class="custom-form-actions">
+            <button type="submit" class="ghost-btn primary">Add</button>
+            <button type="button" id="custom-cancel" class="ghost-btn">Cancel</button>
+          </div>
+          <p class="helper">Custom components help you sketch, but they never satisfy a puzzle's checklist — scoring matches the built-in types only.</p>
+        </form>
+
+        <div id="palette-groups" class="palette-groups"></div>
+      </aside>
+
+      <!-- Stage ------------------------------------------------------------>
+      <section class="stage">
+        <div class="problem-info">
+          <div class="problem-info-head">
+            <h1 id="problem-title"></h1>
+            <button id="requirements-toggle" class="ghost-btn" type="button" aria-expanded="true">
+              Requirements
+            </button>
+          </div>
+          <p id="problem-desc" class="problem-desc"></p>
+          <ul id="requirements-list" class="requirements-list"></ul>
+        </div>
+
+        <div class="toolbar" role="toolbar" aria-label="Board actions">
+          <button id="connect-toggle" class="tool-btn" type="button" aria-pressed="false">
+            <span class="tool-icon">⟶</span> Connect blocks
+          </button>
+          <button id="hint-btn" class="tool-btn" type="button">
+            💡 Hint <span id="hint-count" class="pill">3 left</span>
+          </button>
+          <div class="toolbar-spacer"></div>
+          <button id="clear-btn" class="tool-btn subtle" type="button">Clear board</button>
+          <button id="solve-btn" class="tool-btn" type="button">Solve for me</button>
+          <button id="evaluate-btn" class="tool-btn primary" type="button">Evaluate design</button>
+        </div>
+
+        <div id="hints-panel" class="hints-panel" hidden>
+          <h3>Hints used <span class="hints-note">(−5 points each)</span></h3>
+          <ol id="hints-list"></ol>
+        </div>
+
+        <div class="canvas-wrap">
+          <div id="canvas" class="canvas" aria-label="Design board"></div>
+          <p id="connect-banner" class="connect-banner" hidden>Connect mode: click one block, then another, to wire them. Click a line to delete it.</p>
+          <p id="empty-hint" class="empty-hint">Click a component on the left to drop it here.</p>
+        </div>
+      </section>
+    </main>
+
+    <!-- Evaluation result modal --------------------------------------------->
+    <div id="result-modal" class="modal-backdrop" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="result-heading">
+        <button class="modal-close" id="result-close" type="button" aria-label="Close">×</button>
+        <h2 id="result-heading" class="sr-only">Evaluation result</h2>
+        <div class="score-wrap">
+          <div id="score-ring" class="score-ring">
+            <span id="score-value" class="score-value">0</span>
+            <span class="score-max">/ 100</span>
+          </div>
+          <p id="score-note" class="score-note"></p>
+        </div>
+        <ul id="result-checklist" class="result-checklist"></ul>
+        <div class="modal-actions">
+          <button id="result-dismiss" class="tool-btn primary" type="button">Keep building</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Solve-for-me explanation panel -------------------------------------->
+    <div id="solve-panel" class="solve-panel" hidden>
+      <div class="solve-panel-head">
+        <h2>One valid solution</h2>
+        <button id="solve-close" class="ghost-btn" type="button">Close</button>
+      </div>
+      <p class="helper">This is one valid architecture, not the only one. It is built from the same checklist the grader uses.</p>
+      <h3>Components</h3>
+      <ul id="solve-components" class="solve-list"></ul>
+      <h3>Connections</h3>
+      <ul id="solve-connections" class="solve-list"></ul>
+    </div>
+
+    <!-- Generic confirm modal ----------------------------------------------->
+    <div id="confirm-modal" class="modal-backdrop" hidden>
+      <div class="modal confirm" role="dialog" aria-modal="true" aria-labelledby="confirm-text">
+        <p id="confirm-text" class="confirm-text"></p>
+        <div class="modal-actions">
+          <button id="confirm-cancel" class="tool-btn subtle" type="button">Cancel</button>
+          <button id="confirm-ok" class="tool-btn primary" type="button">Confirm</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="src/main.js"></script>
+  </body>
+</html>
