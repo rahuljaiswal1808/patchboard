@@ -1,31 +1,50 @@
 // Canvas / rendering logic for Patchboard.
 //
-// Blocks are absolutely-positioned DOM elements (bordered rectangles with a
-// colored left edge). Connections are drawn in a single SVG overlay that shares
-// the canvas coordinate space, as dashed "marching ants" lines with a
-// directional arrowhead. The class owns all placement, dragging, connect-mode
-// wiring, and deletion; it emits hooks so the app layer can play sounds and
-// react without the canvas knowing about audio or UI.
+// Blocks are absolutely-positioned DOM elements living inside a transformed
+// "world" layer, so the whole board can be panned (drag empty space) and zoomed
+// (buttons or wheel). Connections are drawn in an SVG overlay that shares the
+// world coordinate space, as dashed "marching ants" lines with a directional
+// arrowhead and an optional text label.
+//
+// Clicking a connection SELECTS it (it does not delete). A small floating
+// toolbar then appears at the line's midpoint with a delete (×) button and a
+// label (✎) button. Selection lives in screen space so its controls stay a
+// constant size regardless of zoom.
 
 import { getComponent, categoryColor } from './data/components.js';
 
 let BLOCK_SEQ = 0;
 let CONN_SEQ = 0;
 
+const clamp = (v, lo, hi) => Math.max(lo, Math.min(v, hi));
+
 export class Board {
   constructor(canvasEl, hooks = {}) {
-    this.canvas = canvasEl;
-    this.hooks = hooks; // { onPlace, onConnect, onDeleteBlock, onDeleteConnection }
+    this.canvas = canvasEl; // the fixed viewport
+    this.hooks = hooks; // onPlace,onConnect,onDeleteBlock,onDeleteConnection,onSelectConnection,onEditLabel
 
     this.blocks = new Map(); // id -> { id, type, x, y, el }
-    this.connections = new Map(); // id -> { id, a, b, group, line, hit }
+    this.connections = new Map(); // id -> { id, a, b, group, line, hit, labelEl, labelBg, label }
 
     this.connectMode = false;
-    this.pendingSource = null; // block id awaiting a second click, in connect mode
-    this._cascade = 0; // offsets successive palette drops so they don't stack
+    this.pendingSource = null;
+    this.selectedConn = null;
+    this._cascade = 0;
 
-    // SVG overlay for connections, sized to the canvas via CSS (100%/100%).
-    this.svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    // View transform (world -> screen): screen = world * zoom + pan.
+    this.zoom = 1;
+    this.panX = 0;
+    this.panY = 0;
+    this.minZoom = 0.4;
+    this.maxZoom = 2.5;
+
+    // World layer holds blocks + the connection SVG and carries the transform.
+    this.world = document.createElement('div');
+    this.world.className = 'world';
+    this.canvas.appendChild(this.world);
+
+    const NS = 'http://www.w3.org/2000/svg';
+    this.svg = document.createElementNS(NS, 'svg');
     this.svg.classList.add('conn-layer');
     this.svg.setAttribute('preserveAspectRatio', 'none');
     this.svg.innerHTML = `
@@ -35,26 +54,164 @@ export class Board {
           <path d="M0 0 L10 5 L0 10 z" fill="context-stroke"></path>
         </marker>
       </defs>`;
-    this.canvas.appendChild(this.svg);
+    this.world.appendChild(this.svg);
 
-    this._onResize = () => this.redraw();
+    // Screen-space overlay for the selected-connection toolbar.
+    this.overlay = document.createElement('div');
+    this.overlay.className = 'canvas-overlay';
+    this.canvas.appendChild(this.overlay);
+
+    this.connToolbar = document.createElement('div');
+    this.connToolbar.className = 'conn-toolbar';
+    this.connToolbar.hidden = true;
+    this.connToolbar.innerHTML = `
+      <button type="button" class="conn-tool-btn" data-act="label" title="Edit label" aria-label="Edit label">✎</button>
+      <button type="button" class="conn-tool-btn danger" data-act="delete" title="Delete connection" aria-label="Delete connection">×</button>`;
+    this.overlay.appendChild(this.connToolbar);
+    this.connToolbar.addEventListener('pointerdown', (e) => e.stopPropagation());
+    this.connToolbar.querySelector('[data-act="delete"]').addEventListener('click', () => {
+      if (this.selectedConn) this._destroyConnection(this.selectedConn);
+    });
+    this.connToolbar.querySelector('[data-act="label"]').addEventListener('click', () => {
+      const conn = this.connections.get(this.selectedConn);
+      if (conn && this.hooks.onEditLabel) this.hooks.onEditLabel(conn);
+    });
+
+    this._applyTransform();
+    this._wireViewport();
+
+    this._onResize = () => {
+      this.redraw();
+      this._positionToolbar();
+    };
     window.addEventListener('resize', this._onResize);
+  }
+
+  // ---- coordinate transforms ------------------------------------------
+
+  screenToWorld(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left - this.panX) / this.zoom,
+      y: (clientY - rect.top - this.panY) / this.zoom,
+    };
+  }
+
+  // World point -> pixels relative to the canvas top-left.
+  worldToScreen(x, y) {
+    return { x: x * this.zoom + this.panX, y: y * this.zoom + this.panY };
+  }
+
+  _applyTransform() {
+    this.world.style.transform = `translate(${this.panX}px, ${this.panY}px) scale(${this.zoom})`;
+    // Pan + zoom the blueprint grid along with the content.
+    const g = 26 * this.zoom;
+    const G = 130 * this.zoom;
+    this.canvas.style.backgroundSize = `${g}px ${g}px, ${g}px ${g}px, ${G}px ${G}px, ${G}px ${G}px`;
+    this.canvas.style.backgroundPosition = `${this.panX}px ${this.panY}px`;
+  }
+
+  // ---- viewport: pan + zoom -------------------------------------------
+
+  _wireViewport() {
+    // Pan by dragging empty canvas/world background (not a block or line).
+    this.canvas.addEventListener('pointerdown', (e) => {
+      if (e.target.closest('.block') || e.target.closest('.conn-toolbar')) return;
+      if (e.target.classList && e.target.classList.contains('conn-hit')) return;
+      // A background click also deselects any selected connection.
+      this._deselectConnection();
+      this._startPan(e);
+    });
+
+    this.canvas.addEventListener(
+      'wheel',
+      (e) => {
+        e.preventDefault();
+        const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+        this.zoomAt(this.zoom * factor, e.clientX, e.clientY);
+      },
+      { passive: false },
+    );
+  }
+
+  _startPan(e) {
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const originX = this.panX;
+    const originY = this.panY;
+    this.canvas.classList.add('panning');
+    this.canvas.setPointerCapture(e.pointerId);
+
+    const move = (ev) => {
+      this.panX = originX + (ev.clientX - startX);
+      this.panY = originY + (ev.clientY - startY);
+      this._applyTransform();
+      this._positionToolbar();
+    };
+    const up = (ev) => {
+      this.canvas.classList.remove('panning');
+      try {
+        this.canvas.releasePointerCapture(ev.pointerId);
+      } catch (_) {
+        /* already released */
+      }
+      this.canvas.removeEventListener('pointermove', move);
+      this.canvas.removeEventListener('pointerup', up);
+    };
+    this.canvas.addEventListener('pointermove', move);
+    this.canvas.addEventListener('pointerup', up);
+  }
+
+  // Zoom keeping the world point under (clientX, clientY) fixed on screen.
+  zoomAt(newZoom, clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    const sx = clientX - rect.left;
+    const sy = clientY - rect.top;
+    const wx = (sx - this.panX) / this.zoom;
+    const wy = (sy - this.panY) / this.zoom;
+    this.zoom = clamp(newZoom, this.minZoom, this.maxZoom);
+    this.panX = sx - wx * this.zoom;
+    this.panY = sy - wy * this.zoom;
+    this._applyTransform();
+    this._positionToolbar();
+  }
+
+  // Zoom around the viewport center (used by the +/- buttons).
+  zoomByCenter(factor) {
+    const rect = this.canvas.getBoundingClientRect();
+    this.zoomAt(this.zoom * factor, rect.left + rect.width / 2, rect.top + rect.height / 2);
+  }
+
+  resetView() {
+    this.zoom = 1;
+    this.panX = 0;
+    this.panY = 0;
+    this._applyTransform();
+    this._positionToolbar();
   }
 
   // ---- placement -------------------------------------------------------
 
-  // Add a block of `type`. If x/y are omitted, cascades near the top-left so
-  // successive palette drops don't land on top of each other.
+  // World point near the current viewport center, cascaded so successive
+  // palette drops don't stack.
+  _placementPoint() {
+    const rect = this.canvas.getBoundingClientRect();
+    const c = this.screenToWorld(rect.left + rect.width / 2, rect.top + rect.height / 2);
+    const step = 26;
+    const off = (this._cascade % 8) * step - 90;
+    this._cascade++;
+    return { x: c.x + off, y: c.y + off };
+  }
+
   addBlock(type, x, y, { animate = true } = {}) {
     const def = getComponent(type);
     if (!def) return null;
 
     const id = `b${++BLOCK_SEQ}`;
     if (x == null || y == null) {
-      const step = 26;
-      x = 40 + (this._cascade % 8) * step;
-      y = 40 + (this._cascade % 8) * step;
-      this._cascade++;
+      const p = this._placementPoint();
+      x = p.x;
+      y = p.y;
     }
 
     const el = document.createElement('div');
@@ -74,7 +231,7 @@ export class Board {
     if (def.custom) el.classList.add('is-custom');
     if (animate) el.classList.add('pop-in');
 
-    this.canvas.appendChild(el);
+    this.world.appendChild(el);
     const block = { id, type, x, y, el };
     this.blocks.set(id, block);
 
@@ -86,15 +243,14 @@ export class Board {
   _wireBlock(block) {
     const { el } = block;
 
-    // Delete button.
     el.querySelector('.block-del').addEventListener('click', (e) => {
       e.stopPropagation();
       this.removeBlock(block.id);
     });
 
-    // Click / drag behaviour depends on connect mode.
     el.addEventListener('pointerdown', (e) => {
       if (e.target.closest('.block-del')) return;
+      e.stopPropagation(); // never start a pan from a block
       if (this.connectMode) {
         e.preventDefault();
         this._handleConnectClick(block);
@@ -114,19 +270,12 @@ export class Board {
     const originX = block.x;
     const originY = block.y;
 
-    const rect = this.canvas.getBoundingClientRect();
-    const maxX = rect.width - el.offsetWidth;
-    const maxY = rect.height - el.offsetHeight;
-
     const move = (ev) => {
-      let nx = originX + (ev.clientX - startX);
-      let ny = originY + (ev.clientY - startY);
-      nx = Math.max(0, Math.min(nx, maxX));
-      ny = Math.max(0, Math.min(ny, maxY));
-      block.x = nx;
-      block.y = ny;
-      el.style.left = `${nx}px`;
-      el.style.top = `${ny}px`;
+      // Screen deltas are scaled by zoom to get world deltas.
+      block.x = originX + (ev.clientX - startX) / this.zoom;
+      block.y = originY + (ev.clientY - startY) / this.zoom;
+      el.style.left = `${block.x}px`;
+      el.style.top = `${block.y}px`;
       this._redrawFor(block.id);
     };
     const up = (ev) => {
@@ -134,7 +283,7 @@ export class Board {
       try {
         el.releasePointerCapture(ev.pointerId);
       } catch (_) {
-        /* pointer already released */
+        /* already released */
       }
       el.removeEventListener('pointermove', move);
       el.removeEventListener('pointerup', up);
@@ -147,14 +296,11 @@ export class Board {
     const block = this.blocks.get(id);
     if (!block) return;
 
-    // Remove any connections touching this block.
     for (const conn of [...this.connections.values()]) {
       if (conn.a === id || conn.b === id) this._destroyConnection(conn.id, { silent: true });
     }
-
     if (this.pendingSource === id) this._clearPending();
 
-    // Shake, then fade, then remove (distinct from placement's pop-in).
     block.el.classList.remove('pop-in');
     block.el.classList.add('removing');
     const finish = () => {
@@ -183,7 +329,6 @@ export class Board {
       return;
     }
     if (this.pendingSource === block.id) {
-      // Clicking the same block again cancels the pending connection.
       this._clearPending();
       return;
     }
@@ -201,9 +346,7 @@ export class Board {
     this.pendingSource = null;
   }
 
-  // Create a directed connection a -> b. Returns the connection, or null if it
-  // already exists (same unordered pair) or either block is missing.
-  connectBlocks(a, b) {
+  connectBlocks(a, b, label = '') {
     if (a === b || !this.blocks.has(a) || !this.blocks.has(b)) return null;
     for (const c of this.connections.values()) {
       if ((c.a === a && c.b === b) || (c.a === b && c.b === a)) return null;
@@ -214,42 +357,97 @@ export class Board {
     const group = document.createElementNS(NS, 'g');
     group.classList.add('conn');
 
-    // Wide, transparent line for an easy hover/click target.
     const hit = document.createElementNS(NS, 'line');
     hit.classList.add('conn-hit');
 
-    // Visible dashed, animated line with an arrowhead at the target end.
     const line = document.createElementNS(NS, 'line');
     line.classList.add('conn-line');
     line.setAttribute('marker-end', 'url(#arrow)');
 
+    const labelBg = document.createElementNS(NS, 'rect');
+    labelBg.classList.add('conn-label-bg');
+    const labelEl = document.createElementNS(NS, 'text');
+    labelEl.classList.add('conn-label');
+    labelEl.setAttribute('text-anchor', 'middle');
+    labelEl.setAttribute('dominant-baseline', 'middle');
+
     group.appendChild(hit);
     group.appendChild(line);
+    group.appendChild(labelBg);
+    group.appendChild(labelEl);
     this.svg.appendChild(group);
 
-    const conn = { id, a, b, group, line, hit };
+    const conn = { id, a, b, group, line, hit, labelEl, labelBg, label: '' };
     this.connections.set(id, conn);
 
-    const highlight = (on) => group.classList.toggle('conn-hover', on);
+    const highlight = (on) => {
+      if (this.selectedConn !== id) group.classList.toggle('conn-hover', on);
+    };
     group.addEventListener('pointerenter', () => highlight(true));
     group.addEventListener('pointerleave', () => highlight(false));
-    group.addEventListener('click', () => this._destroyConnection(id));
+    group.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this._selectConnection(id);
+    });
 
+    if (label) this.setConnectionLabel(id, label);
     this._drawConnection(conn);
     if (this.hooks.onConnect) this.hooks.onConnect(conn);
     return conn;
   }
 
+  _selectConnection(id) {
+    if (this.selectedConn === id) return;
+    this._deselectConnection();
+    const conn = this.connections.get(id);
+    if (!conn) return;
+    this.selectedConn = id;
+    conn.group.classList.remove('conn-hover');
+    conn.group.classList.add('selected');
+    this.connToolbar.hidden = false;
+    this._positionToolbar();
+    if (this.hooks.onSelectConnection) this.hooks.onSelectConnection(conn);
+  }
+
+  _deselectConnection() {
+    if (this.selectedConn == null) return;
+    const conn = this.connections.get(this.selectedConn);
+    if (conn) conn.group.classList.remove('selected');
+    this.selectedConn = null;
+    this.connToolbar.hidden = true;
+  }
+
+  _positionToolbar() {
+    if (this.selectedConn == null) return;
+    const conn = this.connections.get(this.selectedConn);
+    if (!conn) return;
+    const a = this.blocks.get(conn.a);
+    const b = this.blocks.get(conn.b);
+    if (!a || !b) return;
+    const midWorldX = (a.x + a.el.offsetWidth / 2 + b.x + b.el.offsetWidth / 2) / 2;
+    const midWorldY = (a.y + a.el.offsetHeight / 2 + b.y + b.el.offsetHeight / 2) / 2;
+    const p = this.worldToScreen(midWorldX, midWorldY);
+    this.connToolbar.style.left = `${p.x}px`;
+    this.connToolbar.style.top = `${p.y}px`;
+  }
+
+  setConnectionLabel(id, text) {
+    const conn = this.connections.get(id);
+    if (!conn) return;
+    conn.label = (text || '').trim();
+    conn.labelEl.textContent = conn.label;
+    this._drawConnection(conn);
+  }
+
   _destroyConnection(id, { silent = false } = {}) {
     const conn = this.connections.get(id);
     if (!conn) return;
+    if (this.selectedConn === id) this._deselectConnection();
     conn.group.remove();
     this.connections.delete(id);
     if (!silent && this.hooks.onDeleteConnection) this.hooks.onDeleteConnection(conn);
   }
 
-  // Compute the point on a block's border facing a given external point, so the
-  // line starts/ends at the block edge and the arrowhead sits on the border.
   _borderPoint(block, towardX, towardY) {
     const el = block.el;
     const cx = block.x + el.offsetWidth / 2;
@@ -279,11 +477,40 @@ export class Board {
       seg.setAttribute('x2', pb.x);
       seg.setAttribute('y2', pb.y);
     }
+
+    // Label at the midpoint, with a background rect sized to the text.
+    const mx = (pa.x + pb.x) / 2;
+    const my = (pa.y + pb.y) / 2;
+    if (conn.label) {
+      conn.labelEl.setAttribute('x', mx);
+      conn.labelEl.setAttribute('y', my);
+      conn.labelEl.style.display = '';
+      conn.labelBg.style.display = '';
+      // Size the background after the text has a box.
+      requestAnimationFrame(() => {
+        if (!conn.label) return;
+        const bb = conn.labelEl.getBBox();
+        const padX = 6;
+        const padY = 3;
+        conn.labelBg.setAttribute('x', bb.x - padX);
+        conn.labelBg.setAttribute('y', bb.y - padY);
+        conn.labelBg.setAttribute('width', bb.width + padX * 2);
+        conn.labelBg.setAttribute('height', bb.height + padY * 2);
+        conn.labelBg.setAttribute('rx', 4);
+      });
+    } else {
+      conn.labelEl.style.display = 'none';
+      conn.labelBg.style.display = 'none';
+    }
   }
 
   _redrawFor(blockId) {
     for (const conn of this.connections.values()) {
       if (conn.a === blockId || conn.b === blockId) this._drawConnection(conn);
+    }
+    if (this.selectedConn != null) {
+      const c = this.connections.get(this.selectedConn);
+      if (c && (c.a === blockId || c.b === blockId)) this._positionToolbar();
     }
   }
 
@@ -293,18 +520,17 @@ export class Board {
 
   // ---- bulk ------------------------------------------------------------
 
-  // Remove everything from the board immediately (no per-item animation), used
-  // when switching problems or before Solve-for-me builds a fresh board.
   clear() {
     this._clearPending();
+    this._deselectConnection();
     for (const conn of this.connections.values()) conn.group.remove();
     this.connections.clear();
     for (const block of this.blocks.values()) block.el.remove();
     this.blocks.clear();
     this._cascade = 0;
+    this.resetView();
   }
 
-  // Snapshot used by the evaluator: placed types and the type pairs they wire.
   snapshot() {
     const placedTypes = [...this.blocks.values()].map((b) => b.type);
     const connectionPairs = [...this.connections.values()].map((c) => ({
@@ -314,7 +540,6 @@ export class Board {
     return { placedTypes, connectionPairs, blockCount: this.blocks.size };
   }
 
-  // Find one existing block of `type`, or null.
   findBlockByType(type) {
     for (const block of this.blocks.values()) {
       if (block.type === type) return block;

@@ -34,6 +34,10 @@
       </div>
 
       <div class="header-controls">
+        <button id="theme-toggle" class="icon-btn" type="button" title="Switch to light mode">
+          <span class="theme-icon" aria-hidden="true"></span>
+          <span class="icon-btn-label" id="theme-label">Dark</span>
+        </button>
         <button id="ambient-toggle" class="icon-btn" type="button" aria-pressed="false" title="Ambient drone (off)">
           <span class="icon-btn-dot" aria-hidden="true"></span>
           <span class="icon-btn-label">Ambient</span>
@@ -79,9 +83,12 @@
         <div class="problem-info">
           <div class="problem-info-head">
             <h1 id="problem-title"></h1>
-            <button id="requirements-toggle" class="ghost-btn" type="button" aria-expanded="true">
-              Requirements
-            </button>
+            <div class="problem-info-actions">
+              <button id="delete-problem-btn" class="ghost-btn danger" type="button" hidden>Delete problem</button>
+              <button id="requirements-toggle" class="ghost-btn" type="button" aria-expanded="true">
+                Requirements
+              </button>
+            </div>
           </div>
           <p id="problem-desc" class="problem-desc"></p>
           <ul id="requirements-list" class="requirements-list"></ul>
@@ -107,8 +114,14 @@
 
         <div class="canvas-wrap">
           <div id="canvas" class="canvas" aria-label="Design board"></div>
-          <p id="connect-banner" class="connect-banner" hidden>Connect mode: click one block, then another, to wire them. Click a line to delete it.</p>
+          <p id="connect-banner" class="connect-banner" hidden>Connect mode: click one block, then another, to wire them. Click a line to select it.</p>
           <p id="empty-hint" class="empty-hint">Click a component on the left to drop it here.</p>
+          <div class="zoom-controls" role="group" aria-label="Zoom and pan">
+            <button id="zoom-in" class="zoom-btn" type="button" aria-label="Zoom in" title="Zoom in">+</button>
+            <button id="zoom-reset" class="zoom-btn" type="button" aria-label="Reset view" title="Reset view">⤾</button>
+            <button id="zoom-out" class="zoom-btn" type="button" aria-label="Zoom out" title="Zoom out">−</button>
+          </div>
+          <p class="pan-hint">Drag empty space to pan · scroll to zoom</p>
         </div>
       </section>
     </main>
@@ -143,6 +156,69 @@
       <ul id="solve-components" class="solve-list"></ul>
       <h3>Connections</h3>
       <ul id="solve-connections" class="solve-list"></ul>
+    </div>
+
+    <!-- Connection label editor --------------------------------------------->
+    <div id="label-modal" class="modal-backdrop" hidden>
+      <div class="modal confirm" role="dialog" aria-modal="true" aria-labelledby="label-modal-title">
+        <h2 id="label-modal-title" class="modal-title">Connection label</h2>
+        <form id="label-form">
+          <input id="label-input" class="text-input" type="text" maxlength="40" placeholder="e.g. reads from cache" autocomplete="off" />
+          <div class="modal-actions">
+            <button type="button" id="label-clear" class="tool-btn subtle">Clear</button>
+            <button type="submit" class="tool-btn primary">Save</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Custom problem builder ---------------------------------------------->
+    <div id="builder-modal" class="modal-backdrop" hidden>
+      <div class="modal builder" role="dialog" aria-modal="true" aria-labelledby="builder-title">
+        <button class="modal-close" id="builder-close" type="button" aria-label="Close">×</button>
+        <h2 id="builder-title">Create a custom problem</h2>
+        <p class="helper">Define the requirements your design is scored against. Each requirement lists the acceptable component types (any one counts). The first type selected is used by "Solve for me".</p>
+
+        <form id="builder-form">
+          <label class="field">
+            <span class="field-label">Title</span>
+            <input id="builder-name" class="text-input" type="text" maxlength="60" placeholder="Design a Notification Service" required />
+          </label>
+          <label class="field">
+            <span class="field-label">Description</span>
+            <textarea id="builder-desc" class="text-input" rows="2" maxlength="240" placeholder="One or two sentences framing the scenario and its load pattern."></textarea>
+          </label>
+
+          <div class="builder-section">
+            <div class="builder-section-head">
+              <h3>Component requirements</h3>
+              <button type="button" id="add-component-req" class="ghost-btn">+ Add</button>
+            </div>
+            <div id="component-reqs" class="req-rows"></div>
+          </div>
+
+          <div class="builder-section">
+            <div class="builder-section-head">
+              <h3>Connection requirements</h3>
+              <button type="button" id="add-connection-req" class="ghost-btn">+ Add</button>
+            </div>
+            <div id="connection-reqs" class="req-rows"></div>
+          </div>
+
+          <div class="builder-section">
+            <h3>Hints <span class="helper-inline">(optional, most conceptual first)</span></h3>
+            <input class="text-input hint-input" data-hint="0" type="text" maxlength="120" placeholder="Hint 1" />
+            <input class="text-input hint-input" data-hint="1" type="text" maxlength="120" placeholder="Hint 2" />
+            <input class="text-input hint-input" data-hint="2" type="text" maxlength="120" placeholder="Hint 3" />
+          </div>
+
+          <p id="builder-error" class="builder-error" hidden></p>
+          <div class="modal-actions">
+            <button type="button" id="builder-cancel" class="tool-btn subtle">Cancel</button>
+            <button type="submit" class="tool-btn primary">Create problem</button>
+          </div>
+        </form>
+      </div>
     </div>
 
     <!-- Generic confirm modal ----------------------------------------------->
